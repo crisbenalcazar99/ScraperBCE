@@ -6,6 +6,7 @@ Canal de notificación: inserta fila en la tabla de cola de mensajes.
 from datetime import datetime
 
 import pandas as pd
+from sqlalchemy import inspect
 
 from config.settings import (
     TABLA_OTRAS_TASAS,
@@ -48,6 +49,13 @@ def _construir_html(titulo: str, color: str, hechos: list[dict], texto: str) -> 
 def _encolar_correo(titulo: str, color: str, hechos: list[dict], texto: str) -> bool:
     if not COLA_CORREO_NOTIFICAR:
         LOGGER.info("Cola de correos desactivada (COLA_CORREO_NOTIFICAR=False).")
+        return False
+
+    if not inspect(engine).has_table(TABLA_COLA_MENSAJES, schema=DB_SCHEMA):
+        LOGGER.warning(
+            "No se puede encolar correo: la tabla [%s].[%s] no existe en la BD.",
+            DB_SCHEMA, TABLA_COLA_MENSAJES,
+        )
         return False
 
     cuerpo_html = _construir_html(titulo, color, hechos, texto)

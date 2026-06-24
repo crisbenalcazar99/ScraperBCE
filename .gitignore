@@ -1,3 +1,4 @@
 .vs
 .idea
 .logs
+config/settings.py

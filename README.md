@@ -1,11 +1,10 @@
 # tasas_referenciales
 
-Scraper de **Tasas Referenciales del BCE** generado a partir de `scraper-template`
-(Data Engineering — Banco Guayaquil).
+Scraper de **Tasas Referenciales del BCE** — Data Engineering, Banco Guayaquil.
 
 Extrae las tablas de tasas de interés publicadas por el Banco Central del Ecuador,
 las transforma al formato estándar y las carga de forma incremental por periodo en
-SQL Server. Notifica el resultado por Microsoft Teams.
+SQL Server. Notifica el resultado mediante la cola de correos interna.
 
 ---
 
@@ -13,15 +12,19 @@ SQL Server. Notifica el resultado por Microsoft Teams.
 
 `https://contenido.bce.fin.ec/documentos/Estadisticas/SectorMonFin/TasasInteres/Indice.htm`
 
-## Tablas destino (schema `dbo` / base `ANALYTICS`)
+---
 
-| Tabla                                      | Contenido                                       |
-|--------------------------------------------|-------------------------------------------------|
-| `ISC_VIZ_MK_TASAS_MAXIMAS_REFERENCIALES`   | Tasa efectiva máxima + referencial por segmento |
-| `ISC_VIZ_OTRAS_TASAS_REFERENCIALES`        | Otras tasas y tasas por plazo                   |
+## Tablas destino
 
-La carga es **incremental**: solo inserta si el `PERIODO` (AAAAMM) publicado supera
-el máximo ya presente en la tabla destino.
+Todas en la base `DN_STAGING`, schema configurado en `DB_SCHEMA` (`settings.py`).
+
+| Tabla | Contenido |
+|---|---|
+| `ISC_VIZ_MK_TASAS_MAXIMAS_REFERENCIALES` | Tasa efectiva máxima + referencial por segmento |
+| `ISC_VIZ_OTRAS_TASAS_REFERENCIALES` | Otras tasas y tasas por plazo |
+
+La carga es **incremental**: solo inserta si el `PERIODO` (formato AAAAMM) publicado
+por el BCE supera el máximo ya presente en la tabla destino.
 
 ---
 
@@ -31,28 +34,45 @@ el máximo ya presente en la tabla destino.
 tasas_referenciales/
 ├── README.md
 ├── requirements.txt
-├── main.py
+├── main.py                          # Orquestador principal
 ├── config/
-│   ├── __init__.py
-│   └── settings.py
+│   └── settings.py                  # Única fuente de configuración
 └── src/
-    ├── __init__.py
     ├── database/
-    │   ├── __init__.py
-    │   ├── connections.py       # engine SQLAlchemy (Windows Auth)
-    │   └── operations.py        # carga fast_executemany + chunks 10k + diagnóstico
+    │   ├── connections.py            # Engine SQLAlchemy (único punto de conexión)
+    │   └── operations.py            # Lógica de lectura/escritura en BD
     ├── scraper/
-    │   ├── __init__.py
-    │   ├── http_client.py       # descarga HTTP con requests + reintentos + rotación de user-agents
-    │   └── tasas_referenciales.py
+    │   ├── http_client.py           # Descarga HTTP con reintentos y rotación de user-agents
+    │   └── tasas_max_referenciales.py  # Extracción y transformación de tablas BCE
     ├── transform/
-    │   ├── __init__.py
-    │   └── cleaners.py          # normalizar_columnas / limpiar_texto_df (mayúsculas, conserva tildes)
+    │   └── cleaners.py              # Normalización de columnas y limpieza de texto
     └── utils/
-        ├── __init__.py
-        ├── logger.py            # scraper.tasas_referenciales
-        └── notifications.py     # Microsoft Teams (webhook)
+        ├── logger.py                # Logger con resumen de métricas al final
+        └── notifications.py         # Notificaciones vía cola de correos (t_cola_mensajes)
 ```
+
+---
+
+## Configuración
+
+Editar `config/settings.py`:
+
+| Variable | Descripción |
+|---|---|
+| `DRIVER` | Driver ODBC para SQL Server |
+| `SERVERNAME` | Host y puerto del servidor SQL Server |
+| `DB` | Nombre de la base de datos |
+| `DB_SCHEMA` | Schema destino de todas las tablas |
+| `TABLA_TASAS_MAXIMAS` | Nombre de la tabla de tasas máximas |
+| `TABLA_OTRAS_TASAS` | Nombre de la tabla de otras tasas |
+| `TABLA_COLA_MENSAJES` | Tabla de cola de correos para notificaciones |
+| `PERIODO_BASE` | Periodo mínimo (AAAAMM) cuando la tabla está vacía |
+| `COLA_CORREO_NOTIFICAR` | Activar/desactivar notificaciones (`True`/`False`) |
+| `COLA_CORREO_NOMBRE_PERSONA` | Nombre del destinatario en la cola |
+| `COLA_CORREO_USUARIO_PERSONA` | Usuario(s) destinatario(s), separados por `&` |
+| `VERIFY_SSL` | `False` requerido por el portal BCE (certificado TLS inválido) |
+| `NUMERO_INTENTOS_MAX` | Reintentos de descarga HTTP |
+| `TIMEOUT_SEG` | Timeout en segundos para cada petición HTTP |
 
 ---
 
@@ -62,14 +82,6 @@ tasas_referenciales/
 pip install -r requirements.txt
 ```
 
-## Configuración
-
-Editar `config/settings.py`:
-
-- `DB_CONNECTION_STRING` — cadena de conexión SQL Server (Windows Auth, sin credenciales en código).
-- `TEAMS_WEBHOOK_URL` — webhook del canal de Teams del equipo (reemplazar valor).
-- `TEAMS_NOTIFICAR` — activar/desactivar el envío de notificaciones (`True` / `False`).
-
 ## Ejecución
 
 ```bash
@@ -78,21 +90,42 @@ python main.py
 
 ---
 
+## Flujo de ejecución
+
+```
+main.py
+  │
+  ├─ ejecutar_scraping()          ← descarga HTML del BCE y extrae DataFrames
+  │     ├─ obtener_html()         ← HTTP con reintentos
+  │     ├─ construir_tasas_maximas()
+  │     ├─ construir_otras_tasas()
+  │     └─ asignar_periodo()      ← PERIODO (AAAAMM) desde cabecera de la página
+  │
+  ├─ cargar_si_hay_periodo_nuevo()   ← por cada tabla
+  │     ├─ obtener_max_periodo()     ← consulta MAX(PERIODO) en BD
+  │     └─ crear_y_cargar()         ← solo si hay periodo nuevo
+  │           ├─ crear_tabla_si_no_existe()
+  │           └─ insertar_en_chunks()  ← pandas to_sql vía SQLAlchemy
+  │
+  ├─ notificar_exito()   ← si se insertó algo
+  └─ notificar_error()   ← si ocurrió cualquier excepción
+```
+
+---
+
 ## Notificaciones
 
-Al finalizar, el scraper envía una tarjeta a Microsoft Teams:
+Al finalizar se inserta una fila en `t_cola_mensajes` (`DB_SCHEMA`):
 
 - **Éxito**: registros y periodo cargados por tabla.
-- **Sin cambios**: el periodo publicado ya estaba cargado.
-- **Error**: detalle del error crítico de ejecución.
+- **Error**: tipo de excepción y detalle del fallo.
 
-Configurable con `TEAMS_NOTIFICAR` y `TEAMS_WEBHOOK_URL` en `settings.py`.
+Controlado con `COLA_CORREO_NOTIFICAR` en `settings.py`. Si está en `False`, no se encola nada pero el proceso sigue ejecutándose.
 
 ---
 
 ## Notas
 
-- Generado desde `scraper-template`. Es una copia independiente: no se actualiza
-  automáticamente si el template cambia.
-- El portal del BCE requiere `VERIFY_SSL = False` por su certificado TLS;
-  controlado con `VERIFY_SSL` en `settings.py`.
+- El portal del BCE requiere `VERIFY_SSL = False` por su certificado TLS; configurado en `settings.py`.
+- La conexión a SQL Server usa Windows Authentication (sin credenciales en código).
+- La inferencia de tipos SQL para tablas nuevas usa DuckDB; si no está disponible, cae a pandas como alternativa.

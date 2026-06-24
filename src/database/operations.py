@@ -1,13 +1,9 @@
-import pyodbc
-import duckdb
+﻿import duckdb
 import pandas as pd
-from tqdm import tqdm
 from sqlalchemy import text
 
 from src.database.connections import engine
-from src.utils.logger import LOGGER
-from src.utils.logger import registrar_carga
-from config.settings import DRIVER, SERVERNAME, DB
+from src.utils.logger import LOGGER, registrar_carga
 
 CHUNK_SIZE = 10_000
 
@@ -15,89 +11,77 @@ CHUNK_SIZE = 10_000
 _CAMPOS_FORZAR_VARCHAR = {"ruc", "cedula", "identificacion", "pasaporte"}
 
 
-def _construir_cadena_conexion():
-    return (
-        f'DRIVER={{{DRIVER}}};SERVER={SERVERNAME};DATABASE={DB};'
-        'Trusted_Connection=yes;TrustServerCertificate=yes;'
-    )
-
-
-def insertar_en_chunks(df, table_name, chunk_size=CHUNK_SIZE) -> int:
-    LOGGER.info("EJECUTANDO: Conectando via PYODBC para insertar en chunks en la tabla destino: %s", table_name)
-    conn = pyodbc.connect(_construir_cadena_conexion(), autocommit=False)
-    cursor = conn.cursor()
-    cursor.fast_executemany = True
-
-    df = df.astype(object).where(pd.notnull(df), None)
-    columns = list(df.columns)
+def insertar_en_chunks(df, table_name, schema, chunk_size=CHUNK_SIZE) -> int:
     total = len(df)
+    LOGGER.info("EJECUTANDO ACCIÓN: Insertando %d registros en [%s].[%s]", total, schema, table_name)
+    try:
+        df.to_sql(
+            name=table_name,
+            con=engine,
+            schema=schema,
+            if_exists="append",
+            index=False,
+            chunksize=chunk_size,
+        )
+        registrar_carga(table_name, procesados=total, cargados=total)
+        LOGGER.info("Carga finalizada: %d registros insertados en [%s].[%s]", total, schema, table_name)
+        return total
+    except Exception as e:
+        LOGGER.error("ERROR: No se pudo insertar en [%s].[%s]: %s", schema, table_name, e)
+        raise
 
-    insert_sql = (
-        f"INSERT INTO dbo.[{table_name}] "
-        f"({', '.join(f'[{c}]' for c in columns)}) "
-        f"VALUES ({', '.join(['?'] * len(columns))})"
-    )
-    all_values = df.to_numpy().tolist()
+def crear_tabla_si_no_existe(table_name, schema):
+    try:
+        with engine.begin() as conn:
+            existe = conn.execute(
+                text("""
+                    SELECT 1
+                    FROM INFORMATION_SCHEMA.TABLES
+                    WHERE TABLE_SCHEMA = :schema
+                      AND TABLE_NAME = :table_name
+                """),
+                {
+                    "schema": schema,
+                    "table_name": table_name
+                }
+            ).fetchone()
 
-    LOGGER.info("EJECUTANDO ACCIÓN: Insertando %d registros en [%s] (chunks de %d)", total, table_name, chunk_size)
-    with tqdm(total=total, desc=f"Cargando {table_name}", unit="reg") as pbar:
-        for i in range(0, total, chunk_size):
-            chunk = all_values[i : i + chunk_size]
-            try:
-                cursor.executemany(insert_sql, chunk)
-                conn.commit()
-                pbar.update(len(chunk))
-            except Exception as e:
-                conn.rollback()
-                LOGGER.error("ERROR: Fallo en chunk [%d:%d]: %s. Iniciando diagnóstico fila a fila...", i, i + chunk_size, e)
-                for row_idx, row in enumerate(chunk):
-                    try:
-                        cursor.execute(insert_sql, row)
-                        conn.commit()
-                    except Exception as row_err:
-                        global_idx = i + row_idx
-                        LOGGER.error("ERROR: === FILA PROBLEMÁTICA #%d ===", global_idx)
-                        for col_idx, val in enumerate(row):
-                            LOGGER.error("  [%d] %s = %r (%s)", col_idx, columns[col_idx], val, type(val).__name__)
-                        conn.rollback()
-                        cursor.close()
-                        conn.close()
-                        raise row_err
-                cursor.close()
-                conn.close()
-                raise e
+            if not existe:
+                return False
+            else:
+                LOGGER.info(
+                    "EJECUTANDO: La tabla %s.%s ya existe",
+                    schema,
+                    table_name
+                )
 
-    cursor.close()
-    conn.close()
-    registrar_carga(table_name, procesados=total, cargados=total)   # ← aquí
-    LOGGER.info("Carga finalizada: %d registros insertados en [%s]", total, table_name)
-    return total
+        return True
 
+    except Exception as e:
+        LOGGER.error(
+            "ERROR: No se pudo crear/verificar la tabla %s: %s",
+            table_name,
+            e
+        )
+        return False
 
-def crear_y_cargar(df, table_name, ddl=None) -> int:
+def crear_y_cargar(df, table_name, schema,ddl=None) -> int:
     if ddl is None:
         LOGGER.info("EJECUTANDO: Autocalculando DDL para [%s] desde el DataFrame", table_name)
-        ddl = _autocalcular_ddl(df, table_name)
+        ddl = _autocalcular_ddl(df, table_name, schema)
     else:
         LOGGER.info("EJECUTANDO: Usando DDL proporcionado para [%s]", table_name)
 
     LOGGER.info("EJECUTANDO ACCIÓN: DDL:\n%s", ddl)
-    try:
+
+    tabla_existe = crear_tabla_si_no_existe(table_name, schema)
+    if not tabla_existe:
         with engine.begin() as conn:
-            conn.execute(text(f"""
-                IF NOT EXISTS (
-                    SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-                    WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = '{table_name}'
-                )
-                BEGIN
-                    {ddl}
-                END
-            """))
-        LOGGER.info("EJECUTANDO: Tabla [%s] lista. Insertando %d registros.", table_name, len(df))
-        return insertar_en_chunks(df, table_name)
-    except Exception as e:
-        LOGGER.error("ERROR: No se pudo crear y cargar la tabla %s: %s", table_name, e)
-        return 0
+            conn.execute(text(ddl))
+        LOGGER.info("EJECUTANDO: Tabla [%s] creada. Insertando %d registros.", table_name, len(df))
+    else:
+        LOGGER.info("EJECUTANDO: La tabla %s.%s ya existe. Insertando datos nuevos.", schema, table_name)
+    return insertar_en_chunks(df, table_name, schema)
 
 
 
@@ -126,7 +110,7 @@ def cargar_si_hay_periodo_nuevo(df, tabla, schema, periodo_base) -> int:
     LOGGER.info("EJECUTANDO: %s.%s -> periodo origen=%d | periodo BD=%d", schema, tabla, max_periodo_df, max_periodo_db)
 
     if max_periodo_df > max_periodo_db:
-        return crear_y_cargar(df, tabla)
+        return crear_y_cargar(df, tabla, schema)
 
     LOGGER.info("EJECUTANDO: No hay datos nuevos para %s.%s", schema, tabla)
     return 0
@@ -141,7 +125,7 @@ def _es_campo_forzar_varchar(nombre_col):
     return any(k in nombre_lower for k in _CAMPOS_FORZAR_VARCHAR)
 
 
-def _autocalcular_ddl(df, table_name):
+def _autocalcular_ddl(df, table_name, schema):
     try:
         con = duckdb.connect()
         con.register("_tmp_df", df)
@@ -160,7 +144,7 @@ def _autocalcular_ddl(df, table_name):
             tipo_sql = _inferir_tipo_sql_pandas(df, name, dtype)
             lineas.append(f"    [{name}] {tipo_sql} NULL")
 
-    ddl = f"CREATE TABLE [dbo].[{table_name.upper()}] (\n"
+    ddl = f"CREATE TABLE [{schema}].[{table_name.upper()}] (\n"
     ddl += ",\n".join(lineas)
     ddl += "\n);"
     return ddl

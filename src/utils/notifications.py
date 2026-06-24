@@ -1,76 +1,26 @@
 """
 Notificaciones - Banco Guayaquil.
 
-Tres canales de notificación al finalizar la carga:
-- Teams   : MessageCard vía Incoming Webhook (_enviar_card)
-- SMTP    : correo directo vía servidor SMTP (_enviar_correo)
-- BD cola : inserta fila en dbo.t_cola_mensajes (_encolar_correo)
+Canal de notificación: inserta fila en la tabla de cola de mensajes.
 """
 from datetime import datetime
-import requests
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-import smtplib
 
 import pandas as pd
 
 from config.settings import (
-    EQUIPO_RESPONSABLE,
     TABLA_OTRAS_TASAS,
     TABLA_TASAS_MAXIMAS,
-    CORREO_NOTIFICAR,
-    TEAMS_NOTIFICAR,
-    TEAMS_WEBHOOK_URL,
-    TIMEOUT_SEG,
-    SMTP_DESTINATARIOS,
-    SMTP_HOST,
-    SMTP_PORT,
-    SMTP_REMITENTE,
-    SMTP_USAR_TLS,
-    SMTP_USUARIO,
-    SMTP_PASSWORD,
+    TABLA_COLA_MENSAJES,
     COLA_CORREO_NOTIFICAR,
     COLA_CORREO_NOMBRE_PERSONA,
     COLA_CORREO_USUARIO_PERSONA,
+    DB_SCHEMA,
 )
 from src.database.connections import engine
 from src.utils.logger import LOGGER
 
 
-def _enviar_card(titulo: str, color: str, hechos: list[dict], texto: str) -> bool:
-    if not TEAMS_NOTIFICAR:
-        LOGGER.info("Notificaciones Teams desactivadas (TEAMS_NOTIFICAR=False).")
-        return False
-
-    payload = {
-        "@type": "MessageCard",
-        "@context": "http://schema.org/extensions",
-        "themeColor": color,
-        "summary": titulo,
-        "sections": [
-            {
-                "activityTitle": titulo,
-                "activitySubtitle": EQUIPO_RESPONSABLE,
-                "facts": hechos,
-                "text": texto,
-                "markdown": True,
-            }
-        ],
-    }
-
-    try:
-        LOGGER.info("Intento de Envio de Notificaciones")
-        resp = requests.post(TEAMS_WEBHOOK_URL, json=payload, timeout=TIMEOUT_SEG)
-        resp.raise_for_status()
-        LOGGER.info("Notificación Teams enviada: %s", titulo)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("No se pudo enviar notificación a Teams: %s", exc)
-        return False
-
-
 def _construir_html(titulo: str, color: str, hechos: list[dict], texto: str) -> str:
-    """Genera el cuerpo HTML del correo a partir de los hechos."""
     filas = "".join(
         f"""
         <tr>
@@ -86,7 +36,6 @@ def _construir_html(titulo: str, color: str, hechos: list[dict], texto: str) -> 
     <div style="border-left:6px solid #{color};padding:12px 20px;
                 background:#fafafa;max-width:640px;">
       <h2 style="margin:0 0 4px 0;">{titulo}</h2>
-      <p style="margin:0 0 16px 0;color:#666;font-size:13px;">{EQUIPO_RESPONSABLE}</p>
       <p style="margin:0 0 16px 0;">{texto}</p>
       <table style="border-collapse:collapse;width:100%;font-size:14px;">
         {filas}
@@ -94,35 +43,6 @@ def _construir_html(titulo: str, color: str, hechos: list[dict], texto: str) -> 
     </div>
   </body>
 </html>"""
-
-
-def _enviar_correo(titulo: str, color: str, hechos: list[dict], texto: str) -> bool:
-    if not CORREO_NOTIFICAR:
-        LOGGER.info("Notificaciones por correo desactivadas (CORREO_NOTIFICAR=False).")
-        return False
-
-    msg = MIMEMultipart("alternative")
-    # El asunto suele llevar texto plano; quitamos posibles emojis si tu MTA los rechaza.
-    msg["Subject"] = titulo
-    msg["From"] = SMTP_REMITENTE
-    msg["To"] = ", ".join(SMTP_DESTINATARIOS)
-
-    cuerpo_html = _construir_html(titulo, color, hechos, texto)
-    msg.attach(MIMEText(cuerpo_html, "html", "utf-8"))
-
-    try:
-        LOGGER.info("Intento de Envio de Notificaciones por correo")
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=TIMEOUT_SEG) as server:
-            if SMTP_USAR_TLS:
-                server.starttls()
-            if SMTP_USUARIO and SMTP_PASSWORD:
-                server.login(SMTP_USUARIO, SMTP_PASSWORD)
-            server.send_message(msg)
-        LOGGER.info("Notificación por correo enviada: %s", titulo)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("No se pudo enviar notificación por correo: %s", exc)
-        return False
 
 
 def _encolar_correo(titulo: str, color: str, hechos: list[dict], texto: str) -> bool:
@@ -141,17 +61,17 @@ def _encolar_correo(titulo: str, color: str, hechos: list[dict], texto: str) -> 
     })
     try:
         df_correo.to_sql(
-            name="t_cola_mensajes",
+            name=TABLA_COLA_MENSAJES,
             con=engine,
             if_exists="append",
             index=False,
-            schema="dbo",
+            schema=DB_SCHEMA,
             chunksize=1,
         )
-        LOGGER.info("Correo encolado en t_cola_mensajes: %s", titulo)
+        LOGGER.info("Correo encolado en %s: %s", TABLA_COLA_MENSAJES, titulo)
         return True
     except Exception as exc:
-        LOGGER.warning("No se pudo encolar correo en t_cola_mensajes: %s", exc)
+        LOGGER.warning("No se pudo encolar correo en %s: %s", TABLA_COLA_MENSAJES, exc)
         return False
 
 
@@ -161,7 +81,6 @@ def notificar_exito(
     registros_otras: int,
     periodo_otras: int,
 ) -> bool:
-    """Notifica a Teams una carga exitosa de las tablas de tasas."""
     ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     hechos = [
         {"name": "Tabla", "value": TABLA_TASAS_MAXIMAS},
@@ -172,21 +91,8 @@ def notificar_exito(
         {"name": "Periodo (otras)", "value": str(periodo_otras)},
         {"name": "Fecha", "value": ahora},
     ]
-
-    _enviar_correo(
-        titulo="✅ Tasas Referenciales actualizadas",
-        color="2EB67D",
-        hechos=hechos,
-        texto="La carga de tasas referenciales del BCE finalizó correctamente.",
-    )
-    _encolar_correo(
-        titulo="✅ Tasas Referenciales actualizadas",
-        color="2EB67D",
-        hechos=hechos,
-        texto="La carga de tasas referenciales del BCE finalizó correctamente.",
-    )
-    return _enviar_card(
-        titulo="✅ Tasas Referenciales actualizadas",
+    return _encolar_correo(
+        titulo="Actualización exitosa: TASAS REFERENCIALES",
         color="2EB67D",
         hechos=hechos,
         texto="La carga de tasas referenciales del BCE finalizó correctamente.",
@@ -194,26 +100,13 @@ def notificar_exito(
 
 
 def notificar_error(mensaje: str) -> bool:
-    """Notifica a Teams un error crítico de ejecución."""
     ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     hechos = [
         {"name": "Fecha", "value": ahora},
         {"name": "Detalle", "value": mensaje[:500]},
     ]
-    _enviar_correo(
-        titulo="❌ Tasas Referenciales: error de ejecución",
-        color="E01E5A",
-        hechos=hechos,
-        texto="Ocurrió un error durante la ejecución del scraper.",
-    )
-    _encolar_correo(
-        titulo="❌ Tasas Referenciales: error de ejecución",
-        color="E01E5A",
-        hechos=hechos,
-        texto="Ocurrió un error durante la ejecución del scraper.",
-    )
-    return _enviar_card(
-        titulo="❌ Tasas Referenciales: error de ejecución",
+    return _encolar_correo(
+        titulo="Tasas Referenciales: error de ejecución",
         color="E01E5A",
         hechos=hechos,
         texto="Ocurrió un error durante la ejecución del scraper.",

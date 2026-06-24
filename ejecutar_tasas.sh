@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# run.sh — Ejecutor estándar para {{cookiecutter.project_name}}
+# run.sh — Ejecutor estándar para TASAS_REFERENCIALES
 # =============================================================================
 # Responsabilidades:
 #   1. Autenticar con Kerberos (kinit)
@@ -56,8 +56,10 @@ cd "$RUTA_SCRIPT"
 # 3. Ejecución de main.py
 # ---------------------------------------------------------------------------
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Iniciando $PROYECTO..."
+set +e
 SALIDA_SCRIPT=$("$RUTA_SCRIPT/venv/bin/python3.12" "main.py" 2>&1)
 CODIGO_SALIDA=$?
+set -e
 
 # ---------------------------------------------------------------------------
 # 4. Parseo del [RESUMEN]
@@ -70,7 +72,7 @@ CODIGO_SALIDA=$?
 #     [4] = Duración      (HH:MM:SS)
 #     [5] = Detalle error (solo si ERROR, opcional)
 # ---------------------------------------------------------------------------
-LINEA_RESUMEN=$(echo "$SALIDA_SCRIPT" | grep "\[RESUMEN\]" | tail -n 1 | sed 's/.*\[RESUMEN\]/[RESUMEN]/')
+LINEA_RESUMEN=$(echo "$SALIDA_SCRIPT" | grep "\[RESUMEN\]" | tail -n 1 | sed 's/.*\[RESUMEN\]/[RESUMEN]/') || true
 
 if [[ "$LINEA_RESUMEN" == *"[RESUMEN]"* ]]; then
     STATUS=$(echo   "$LINEA_RESUMEN" | cut -d'|' -f2 | xargs)

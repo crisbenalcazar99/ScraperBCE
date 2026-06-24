@@ -1,9 +1,9 @@
-"""
+﻿"""
 Punto de entrada del scraper de Tasas Referenciales del BCE - Banco Guayaquil.
 Ejecuta el scraping (extracción + transformación) y carga los resultados a
 la base de datos solo si hay un periodo más reciente.
 """
-from src.scraper.tasas_referenciales import ejecutar_scraping
+from src.scraper.tasas_max_referenciales import ejecutar_scraping
 from src.utils.logger import LOGGER, resumen_errores
 from src.database.operations import cargar_si_hay_periodo_nuevo
 from src.utils.notifications import notificar_exito, notificar_error
@@ -27,14 +27,14 @@ def main() -> None:
         # --- Carga a base de datos ---
         cargado_maximas = cargar_si_hay_periodo_nuevo(
             df_maximas,
-            tabla="ISC_VIZ_MK_TASAS_MAXIMAS_REFERENCIALES",
-            schema="dbo",
+            tabla=settings.TABLA_TASAS_MAXIMAS,
+            schema=settings.DB_SCHEMA,
             periodo_base=settings.PERIODO_BASE,
         )
         cargado_otras = cargar_si_hay_periodo_nuevo(
             df_otras,
-            tabla="ISC_VIZ_OTRAS_TASAS_REFERENCIALES",
-            schema="dbo",
+            tabla=settings.TABLA_OTRAS_TASAS,
+            schema=settings.DB_SCHEMA,
             periodo_base=settings.PERIODO_BASE,
         )
 

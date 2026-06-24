@@ -15,9 +15,9 @@ from config.settings import (
     COLA_CORREO_NOTIFICAR,
     COLA_CORREO_NOMBRE_PERSONA,
     COLA_CORREO_USUARIO_PERSONA,
-    DB_SCHEMA,
+    DB_SCHEMA_COLA,
 )
-from src.database.connections import engine
+from src.database.connections import engine_cola
 from src.utils.logger import LOGGER
 
 
@@ -51,10 +51,10 @@ def _encolar_correo(titulo: str, color: str, hechos: list[dict], texto: str) -> 
         LOGGER.info("Cola de correos desactivada (COLA_CORREO_NOTIFICAR=False).")
         return False
 
-    if not inspect(engine).has_table(TABLA_COLA_MENSAJES, schema=DB_SCHEMA):
+    if not inspect(engine_cola).has_table(TABLA_COLA_MENSAJES, schema=DB_SCHEMA_COLA):
         LOGGER.warning(
             "No se puede encolar correo: la tabla [%s].[%s] no existe en la BD.",
-            DB_SCHEMA, TABLA_COLA_MENSAJES,
+            DB_SCHEMA_COLA, TABLA_COLA_MENSAJES,
         )
         return False
 
@@ -70,10 +70,10 @@ def _encolar_correo(titulo: str, color: str, hechos: list[dict], texto: str) -> 
     try:
         df_correo.to_sql(
             name=TABLA_COLA_MENSAJES,
-            con=engine,
+            con=engine_cola,
             if_exists="append",
             index=False,
-            schema=DB_SCHEMA,
+            schema=DB_SCHEMA_COLA,
             chunksize=1,
         )
         LOGGER.info("Correo encolado en %s: %s", TABLA_COLA_MENSAJES, titulo)
